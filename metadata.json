@@ -1,0 +1,5 @@
+{
+  "name": "Grid Display App",
+  "description": "A web app to display spreadsheet data in a grid format.",
+  "requestFramePermissions": []
+}

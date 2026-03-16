@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Settings, AlertCircle, Loader2, Table, LogIn } from 'lucide-react';
+import { Settings, AlertCircle, Loader2, Table, LogIn, Share2, Check, Maximize, Minimize } from 'lucide-react';
 
 interface DataRow {
   id: string;
@@ -17,29 +17,159 @@ interface PageData {
   items: DataRow[];
 }
 
+const ColumnInput = ({ label, value, onChange, placeholder, required = false, availableHeaders = [] }: any) => {
+  const [mode, setMode] = useState<'select' | 'input'>(
+    availableHeaders.length > 0 && availableHeaders.includes(value) ? 'select' : (availableHeaders.length > 0 && !value ? 'select' : 'input')
+  );
+
+  useEffect(() => {
+    if (availableHeaders.length > 0 && availableHeaders.includes(value)) {
+      setMode('select');
+    } else if (availableHeaders.length === 0) {
+      setMode('input');
+    }
+  }, [availableHeaders, value]);
+
+  return (
+    <div>
+      <label className="block text-sm font-semibold text-gray-700 mb-1">
+        {label}
+      </label>
+      {mode === 'select' && availableHeaders.length > 0 ? (
+        <select
+          value={value || ''}
+          onChange={(e) => {
+            if (e.target.value === '__custom__') {
+              setMode('input');
+              onChange('');
+            } else {
+              onChange(e.target.value);
+            }
+          }}
+          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#000066] focus:border-[#000066] outline-none transition-all bg-white"
+          required={required}
+        >
+          <option value="" disabled>Select a column</option>
+          {availableHeaders.map((h: string, i: number) => (
+            <option key={i} value={h}>{h}</option>
+          ))}
+          <option value="__custom__">Type custom column letter...</option>
+        </select>
+      ) : (
+        <div className="relative">
+          <input
+            type="text"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={placeholder}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#000066] focus:border-[#000066] outline-none transition-all pr-20"
+            required={required}
+          />
+          {availableHeaders.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setMode('select');
+                onChange(availableHeaders[0] || '');
+              }}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-[#000066] hover:underline font-medium"
+            >
+              Use List
+            </button>
+          )}
+        </div>
+      )}
+      <p className="text-xs text-gray-500 mt-1">Select header or type column letter</p>
+    </div>
+  );
+};
+
 export default function App() {
-  const [isConfiguring, setIsConfiguring] = useState(true);
-  const [sheetUrl, setSheetUrl] = useState('');
-  const [nameColInput, setNameColInput] = useState('Name');
-  const [datesColInput, setDatesColInput] = useState('Dates');
-  const [startDateColInput, setStartDateColInput] = useState('Start Date');
-  const [endDateColInput, setEndDateColInput] = useState('End Date');
-  const [headerRowInput, setHeaderRowInput] = useState('2');
-  const [itemsPerPageInput, setItemsPerPageInput] = useState('12');
-  const [pageDurationInput, setPageDurationInput] = useState('20');
-  const [refreshIntervalInput, setRefreshIntervalInput] = useState('5');
+  const params = new URLSearchParams(window.location.search);
+  
+  const [isConfiguring, setIsConfiguring] = useState(params.get('auto') !== 'true');
+  const [sheetUrl, setSheetUrl] = useState(params.get('url') || '');
+  const [nameColInput, setNameColInput] = useState(params.get('name') || 'Name');
+  const [datesColInput, setDatesColInput] = useState(params.get('dates') || 'Dates');
+  const [startDateColInput, setStartDateColInput] = useState(params.get('start') || 'Start Date');
+  const [endDateColInput, setEndDateColInput] = useState(params.get('end') || 'End Date');
+  const [headerRowInput, setHeaderRowInput] = useState(params.get('header') || '2');
+  const [itemsPerPageInput, setItemsPerPageInput] = useState(params.get('items') || '12');
+  const [pageDurationInput, setPageDurationInput] = useState(params.get('duration') || '20');
+  const [refreshIntervalInput, setRefreshIntervalInput] = useState(params.get('refresh') || '5');
   const [currentPage, setCurrentPage] = useState(0);
   const [pages, setPages] = useState<PageData[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [displayTitle, setDisplayTitle] = useState('Display Examples');
+  const [displayTitle, setDisplayTitle] = useState(params.get('title') || 'Display Examples');
   
   const [availableSheets, setAvailableSheets] = useState<{sheetId: number, title: string}[]>([]);
-  const [selectedSheetTitles, setSelectedSheetTitles] = useState<string[]>([]);
+  const [selectedSheetTitles, setSelectedSheetTitles] = useState<string[]>(
+    params.get('sheets') ? params.get('sheets')!.split(',') : []
+  );
   const [availableHeaders, setAvailableHeaders] = useState<string[]>([]);
+  const [previewData, setPreviewData] = useState<any[][]>([]);
   const [isFetchingMetadata, setIsFetchingMetadata] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   
   const [authStatus, setAuthStatus] = useState({ isAuthenticated: false, isConfigured: false, checking: true });
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (sheetUrl) params.set('url', sheetUrl);
+    if (nameColInput !== 'Name') params.set('name', nameColInput);
+    if (datesColInput !== 'Dates') params.set('dates', datesColInput);
+    if (startDateColInput !== 'Start Date') params.set('start', startDateColInput);
+    if (endDateColInput !== 'End Date') params.set('end', endDateColInput);
+    if (headerRowInput !== '2') params.set('header', headerRowInput);
+    if (itemsPerPageInput !== '12') params.set('items', itemsPerPageInput);
+    if (pageDurationInput !== '20') params.set('duration', pageDurationInput);
+    if (refreshIntervalInput !== '5') params.set('refresh', refreshIntervalInput);
+    if (displayTitle !== 'Display Examples') params.set('title', displayTitle);
+    if (selectedSheetTitles.length > 0) params.set('sheets', selectedSheetTitles.join(','));
+    if (!isConfiguring) params.set('auto', 'true');
+    
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, '', newUrl);
+  }, [
+    sheetUrl, nameColInput, datesColInput, startDateColInput, endDateColInput,
+    headerRowInput, itemsPerPageInput, pageDurationInput, refreshIntervalInput,
+    displayTitle, selectedSheetTitles, isConfiguring
+  ]);
+
+  useEffect(() => {
+    if (!authStatus.checking && !authStatus.isAuthenticated && !isConfiguring) {
+      setIsConfiguring(true);
+    }
+  }, [authStatus.checking, authStatus.isAuthenticated, isConfiguring]);
+
+  useEffect(() => {
+    if (authStatus.isAuthenticated && !isConfiguring && pages.length === 0 && !loading && !error) {
+      fetchData(false);
+    }
+  }, [authStatus.isAuthenticated, isConfiguring, pages.length, loading, error]);
+
+  useEffect(() => {
+    if (!previewData || previewData.length === 0) return;
+    const headerRowIdx = Math.max(0, parseInt(headerRowInput) - 1 || 0);
+    const headers = previewData[headerRowIdx] ? previewData[headerRowIdx].map((h: string) => h.trim()) : [];
+    const validHeaders = headers.filter(Boolean);
+    setAvailableHeaders(validHeaders);
+    
+    if (validHeaders.includes('Name')) setNameColInput('Name');
+    if (validHeaders.includes('Dates')) setDatesColInput('Dates');
+    if (validHeaders.includes('Start Date')) setStartDateColInput('Start Date');
+    if (validHeaders.includes('End Date')) setEndDateColInput('End Date');
+  }, [previewData, headerRowInput]);
 
   useEffect(() => {
     if (isConfiguring || pages.length === 0) return;
@@ -165,15 +295,7 @@ export default function App() {
       const values: any[][] = result.values;
       if (!values || values.length === 0) return;
 
-      const headerRowIdx = Math.max(0, parseInt(headerRowInput) - 1 || 0);
-      const headers = values[headerRowIdx] ? values[headerRowIdx].map((h: string) => h.trim()) : [];
-      const validHeaders = headers.filter(Boolean);
-      setAvailableHeaders(validHeaders);
-      
-      if (validHeaders.includes('Name')) setNameColInput('Name');
-      if (validHeaders.includes('Dates')) setDatesColInput('Dates');
-      if (validHeaders.includes('Start Date')) setStartDateColInput('Start Date');
-      if (validHeaders.includes('End Date')) setEndDateColInput('End Date');
+      setPreviewData(values.slice(0, 10)); // Store first 10 rows for preview/header detection
     } catch (err) {
       console.error("Failed to fetch headers", err);
     }
@@ -337,6 +459,26 @@ export default function App() {
     await fetchData(false);
   };
 
+  const handleCopyLink = () => {
+    navigator.clipboard.writeText(window.location.href);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const toggleFullscreen = async () => {
+    if (!document.fullscreenElement) {
+      try {
+        await document.documentElement.requestFullscreen();
+      } catch (err) {
+        console.error("Error attempting to enable fullscreen:", err);
+      }
+    } else {
+      if (document.exitFullscreen) {
+        await document.exitFullscreen();
+      }
+    }
+  };
+
   if (authStatus.checking) {
     return (
       <div className="min-h-screen bg-[#000066] flex items-center justify-center">
@@ -431,9 +573,16 @@ export default function App() {
                             const newSelection = e.target.checked
                               ? [...selectedSheetTitles, s.title]
                               : selectedSheetTitles.filter(t => t !== s.title);
+                            
+                            const oldFirst = selectedSheetTitles[0];
+                            const newFirst = newSelection[0];
+                            
                             setSelectedSheetTitles(newSelection);
-                            if (newSelection.length === 1 && e.target.checked) {
-                              fetchHeadersForSheet(extractSheetId(sheetUrl), s.title);
+                            
+                            if (newFirst && newFirst !== oldFirst) {
+                              fetchHeadersForSheet(extractSheetId(sheetUrl), newFirst);
+                            } else if (!newFirst) {
+                              setPreviewData([]);
                             }
                           }}
                           className="w-4 h-4 text-[#000066] rounded border-gray-300 focus:ring-[#000066]"
@@ -445,70 +594,40 @@ export default function App() {
                 </div>
               )}
 
-              <datalist id="sheet-headers">
-                {availableHeaders.map((h, i) => (
-                  <option key={i} value={h} />
-                ))}
-              </datalist>
-
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">
-                    Name Column
-                  </label>
-                  <input
-                    type="text"
-                    list="sheet-headers"
-                    value={nameColInput}
-                    onChange={(e) => setNameColInput(e.target.value)}
-                    placeholder="e.g., Name or A"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#000066] focus:border-[#000066] outline-none transition-all"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">
-                    Dates Column
-                  </label>
-                  <input
-                    type="text"
-                    list="sheet-headers"
-                    value={datesColInput}
-                    onChange={(e) => setDatesColInput(e.target.value)}
-                    placeholder="e.g., Dates or B"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#000066] focus:border-[#000066] outline-none transition-all"
-                    required
-                  />
-                </div>
+                <ColumnInput
+                  label="Name Column"
+                  value={nameColInput}
+                  onChange={setNameColInput}
+                  placeholder="e.g., Name or A"
+                  required={true}
+                  availableHeaders={availableHeaders}
+                />
+                <ColumnInput
+                  label="Dates Column"
+                  value={datesColInput}
+                  onChange={setDatesColInput}
+                  placeholder="e.g., Dates or B"
+                  required={true}
+                  availableHeaders={availableHeaders}
+                />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">
-                    Start Date Column (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    list="sheet-headers"
-                    value={startDateColInput}
-                    onChange={(e) => setStartDateColInput(e.target.value)}
-                    placeholder="e.g., Start Date or C"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#000066] focus:border-[#000066] outline-none transition-all"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">
-                    End Date Column (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    list="sheet-headers"
-                    value={endDateColInput}
-                    onChange={(e) => setEndDateColInput(e.target.value)}
-                    placeholder="e.g., End Date or D"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#000066] focus:border-[#000066] outline-none transition-all"
-                  />
-                </div>
+                <ColumnInput
+                  label="Start Date Column (Optional)"
+                  value={startDateColInput}
+                  onChange={setStartDateColInput}
+                  placeholder="e.g., Start Date or C"
+                  availableHeaders={availableHeaders}
+                />
+                <ColumnInput
+                  label="End Date Column (Optional)"
+                  value={endDateColInput}
+                  onChange={setEndDateColInput}
+                  placeholder="e.g., End Date or D"
+                  availableHeaders={availableHeaders}
+                />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -577,22 +696,59 @@ export default function App() {
                 </div>
               )}
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full bg-[#ffcc66] hover:bg-[#ffb833] text-[#000066] font-bold py-3 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
-              >
-                {loading ? (
-                  <>
-                    <Loader2 size={20} className="animate-spin" />
-                    Loading Data...
-                  </>
-                ) : (
-                  'Load Grid'
-                )}
-              </button>
+              <div className="flex gap-4 pt-4">
+                <button
+                  type="button"
+                  onClick={handleCopyLink}
+                  className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                >
+                  {copied ? <Check size={20} className="text-green-600" /> : <Share2 size={20} />}
+                  {copied ? 'Copied!' : 'Copy Link'}
+                </button>
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="flex-[2] bg-[#ffcc66] hover:bg-[#ffb833] text-[#000066] font-bold py-3 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 size={20} className="animate-spin" />
+                      Loading Data...
+                    </>
+                  ) : (
+                    'Load Grid'
+                  )}
+                </button>
+              </div>
             </form>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  if (loading && pages.length === 0) {
+    return (
+      <div className="min-h-screen bg-[#000066] flex flex-col items-center justify-center font-sans">
+        <Loader2 size={48} className="animate-spin text-[#ffcc66] mb-4" />
+        <p className="text-white text-lg font-medium">Loading Schedule Data...</p>
+      </div>
+    );
+  }
+
+  if (error && pages.length === 0) {
+    return (
+      <div className="min-h-screen bg-[#000066] flex flex-col items-center justify-center font-sans p-8 text-center">
+        <div className="bg-white p-8 rounded-2xl max-w-md w-full shadow-2xl">
+          <AlertCircle size={48} className="text-red-500 mx-auto mb-4" />
+          <h2 className="text-2xl font-bold text-gray-800 mb-2">Failed to Load</h2>
+          <p className="text-gray-600 mb-6">{error}</p>
+          <button
+            onClick={() => setIsConfiguring(true)}
+            className="w-full bg-[#000066] hover:bg-[#00004d] text-white font-bold py-3 px-4 rounded-lg transition-colors"
+          >
+            Return to Configuration
+          </button>
         </div>
       </div>
     );
@@ -605,13 +761,22 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#000066] p-8 md:p-16 font-sans relative flex flex-col">
-      <button
-        onClick={() => setIsConfiguring(true)}
-        className="absolute top-6 right-6 md:top-8 md:right-8 bg-white/10 hover:bg-white/20 text-white p-3 rounded-full transition-colors backdrop-blur-sm z-10"
-        title="Configure Sheet"
-      >
-        <Settings size={24} />
-      </button>
+      <div className="absolute top-6 right-6 md:top-8 md:right-8 flex gap-3 z-10">
+        <button
+          onClick={toggleFullscreen}
+          className="bg-white/10 hover:bg-white/20 text-white p-3 rounded-full transition-colors backdrop-blur-sm"
+          title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+        >
+          {isFullscreen ? <Minimize size={24} /> : <Maximize size={24} />}
+        </button>
+        <button
+          onClick={() => setIsConfiguring(true)}
+          className="bg-white/10 hover:bg-white/20 text-white p-3 rounded-full transition-colors backdrop-blur-sm"
+          title="Configure Sheet"
+        >
+          <Settings size={24} />
+        </button>
+      </div>
 
       <h1 className="text-5xl md:text-6xl font-bold text-center text-[#ffcc66] mb-16">
         {currentTitle}

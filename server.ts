@@ -14,10 +14,53 @@ async function startServer() {
     return `${baseUrl}/auth/callback`;
   };
 
-  app.get("/api/auth/status", (req, res) => {
-    const hasToken = !!req.cookies.google_access_token;
+  const getValidAccessToken = async (req: express.Request, res: express.Response, forceRefresh = false) => {
+    let accessToken = req.cookies.google_access_token;
+    if (accessToken && !forceRefresh) return accessToken;
+
+    const refreshToken = req.cookies.google_refresh_token;
+    if (!refreshToken) return null;
+
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) return null;
+
+    try {
+      const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          refresh_token: refreshToken,
+          grant_type: 'refresh_token'
+        })
+      });
+
+      const tokenData = await tokenResponse.json();
+      if (tokenResponse.ok && tokenData.access_token) {
+        res.cookie('google_access_token', tokenData.access_token, {
+          secure: true,
+          sameSite: 'none',
+          httpOnly: true,
+          maxAge: (tokenData.expires_in - 60) * 1000 // Expire 1 minute early
+        });
+        return tokenData.access_token;
+      } else {
+        res.clearCookie('google_refresh_token');
+        res.clearCookie('google_access_token');
+        return null;
+      }
+    } catch (e) {
+      return null;
+    }
+  };
+
+  app.get("/api/auth/status", async (req, res) => {
     const hasConfig = !!process.env.GOOGLE_CLIENT_ID && !!process.env.GOOGLE_CLIENT_SECRET;
-    res.json({ isAuthenticated: hasToken, isConfigured: hasConfig });
+    const accessToken = await getValidAccessToken(req, res);
+    res.json({ isAuthenticated: !!accessToken, isConfigured: hasConfig });
   });
 
   app.get("/api/auth/url", (req, res) => {
@@ -74,8 +117,17 @@ async function startServer() {
         secure: true,
         sameSite: 'none',
         httpOnly: true,
-        maxAge: tokenData.expires_in * 1000
+        maxAge: (tokenData.expires_in - 60) * 1000
       });
+
+      if (tokenData.refresh_token) {
+        res.cookie('google_refresh_token', tokenData.refresh_token, {
+          secure: true,
+          sameSite: 'none',
+          httpOnly: true,
+          maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+        });
+      }
 
       res.send(`
         <html>
@@ -100,7 +152,7 @@ async function startServer() {
 
   app.get("/api/sheet/metadata", async (req, res) => {
     const { sheetId } = req.query;
-    const accessToken = req.cookies.google_access_token;
+    let accessToken = await getValidAccessToken(req, res);
 
     if (!accessToken) {
       return res.status(401).json({ error: "Not authenticated" });
@@ -108,13 +160,24 @@ async function startServer() {
 
     try {
       const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties`;
-      const metaResponse = await fetch(metaUrl, {
+      let metaResponse = await fetch(metaUrl, {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
+
+      if (metaResponse.status === 401) {
+        // Try refreshing the token
+        accessToken = await getValidAccessToken(req, res, true);
+        if (!accessToken) {
+          return res.status(401).json({ error: "Authentication expired" });
+        }
+        metaResponse = await fetch(metaUrl, {
+          headers: { Authorization: `Bearer ${accessToken}` }
+        });
+      }
+
       const metaData = await metaResponse.json();
       
       if (!metaResponse.ok) {
-        if (metaResponse.status === 401) res.clearCookie('google_access_token');
         return res.status(metaResponse.status).json({ error: metaData.error?.message || "Failed to fetch sheet metadata" });
       }
 
@@ -131,7 +194,7 @@ async function startServer() {
 
   app.get("/api/sheet", async (req, res) => {
     const { sheetId, sheetName, gid } = req.query;
-    const accessToken = req.cookies.google_access_token;
+    let accessToken = await getValidAccessToken(req, res);
 
     if (!accessToken) {
       return res.status(401).json({ error: "Not authenticated" });
@@ -143,13 +206,23 @@ async function startServer() {
       // If we don't have a specific sheetName, fetch metadata to resolve it via gid or pick the first sheet
       if (!targetSheetName) {
         const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties`;
-        const metaResponse = await fetch(metaUrl, {
+        let metaResponse = await fetch(metaUrl, {
           headers: { Authorization: `Bearer ${accessToken}` }
         });
+
+        if (metaResponse.status === 401) {
+          accessToken = await getValidAccessToken(req, res, true);
+          if (!accessToken) {
+            return res.status(401).json({ error: "Authentication expired" });
+          }
+          metaResponse = await fetch(metaUrl, {
+            headers: { Authorization: `Bearer ${accessToken}` }
+          });
+        }
+
         const metaData = await metaResponse.json();
         
         if (!metaResponse.ok) {
-          if (metaResponse.status === 401) res.clearCookie('google_access_token');
           return res.status(metaResponse.status).json({ error: metaData.error?.message || "Failed to fetch sheet metadata" });
         }
 
@@ -170,16 +243,23 @@ async function startServer() {
         return res.status(400).json({ error: "Could not determine sheet name." });
       }
 
-      const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(targetSheetName)}`;
-      const response = await fetch(url, {
+      const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(targetSheetName)}!A1:ZZ`;
+      let response = await fetch(url, {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
 
+      if (response.status === 401) {
+        accessToken = await getValidAccessToken(req, res, true);
+        if (!accessToken) {
+          return res.status(401).json({ error: "Authentication expired" });
+        }
+        response = await fetch(url, {
+          headers: { Authorization: `Bearer ${accessToken}` }
+        });
+      }
+
       const data = await response.json();
       if (!response.ok) {
-        if (response.status === 401) {
-          res.clearCookie('google_access_token');
-        }
         return res.status(response.status).json({ error: data.error?.message || "Failed to fetch sheet" });
       }
 

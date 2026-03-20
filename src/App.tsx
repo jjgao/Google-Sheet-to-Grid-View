@@ -94,8 +94,8 @@ export default function App() {
   const [startDateColInput, setStartDateColInput] = useState(params.get('start') || 'Start Date');
   const [endDateColInput, setEndDateColInput] = useState(params.get('end') || 'End Date');
   const [headerRowInput, setHeaderRowInput] = useState(params.get('header') || '2');
-  const [itemsPerPageInput, setItemsPerPageInput] = useState(params.get('items') || '12');
-  const [pageDurationInput, setPageDurationInput] = useState(params.get('duration') || '20');
+  const [itemsPerPageInput, setItemsPerPageInput] = useState(params.get('items') || '8');
+  const [pageDurationInput, setPageDurationInput] = useState(params.get('duration') || '10');
   const [refreshIntervalInput, setRefreshIntervalInput] = useState(params.get('refresh') || '5');
   const [currentPage, setCurrentPage] = useState(0);
   const [pages, setPages] = useState<PageData[]>([]);
@@ -105,7 +105,7 @@ export default function App() {
   
   const [availableSheets, setAvailableSheets] = useState<{sheetId: number, title: string}[]>([]);
   const [selectedSheetTitles, setSelectedSheetTitles] = useState<string[]>(
-    params.get('sheets') ? params.get('sheets')!.split(',') : []
+    params.get('sheets') ? params.get('sheets')!.split(',').map(s => s.trim()).filter(Boolean) : []
   );
   const [availableHeaders, setAvailableHeaders] = useState<string[]>([]);
   const [previewData, setPreviewData] = useState<any[][]>([]);
@@ -131,11 +131,11 @@ export default function App() {
     if (startDateColInput !== 'Start Date') params.set('start', startDateColInput);
     if (endDateColInput !== 'End Date') params.set('end', endDateColInput);
     if (headerRowInput !== '2') params.set('header', headerRowInput);
-    if (itemsPerPageInput !== '12') params.set('items', itemsPerPageInput);
-    if (pageDurationInput !== '20') params.set('duration', pageDurationInput);
+    if (itemsPerPageInput !== '8') params.set('items', itemsPerPageInput);
+    if (pageDurationInput !== '10') params.set('duration', pageDurationInput);
     if (refreshIntervalInput !== '5') params.set('refresh', refreshIntervalInput);
     if (displayTitle !== 'Display Examples') params.set('title', displayTitle);
-    if (selectedSheetTitles.length > 0) params.set('sheets', selectedSheetTitles.join(','));
+    if (selectedSheetTitles.length > 0) params.set('sheets', selectedSheetTitles.map(s => s.trim()).join(','));
     if (!isConfiguring) params.set('auto', 'true');
     
     const newUrl = `${window.location.pathname}?${params.toString()}`;
@@ -274,10 +274,21 @@ export default function App() {
         const found = metaResult.sheets.find((s: any) => s.sheetId === Number(gid));
         if (found) targetSheet = found.title;
       }
-      setSelectedSheetTitles(targetSheet ? [targetSheet] : []);
+      
+      const validExistingSheets = selectedSheetTitles.filter(title => 
+        metaResult.sheets.some((s: any) => s.title === title)
+      );
 
-      if (targetSheet) {
-        await fetchHeadersForSheet(sheetId, targetSheet);
+      if (validExistingSheets.length > 0) {
+        if (validExistingSheets.length !== selectedSheetTitles.length || !validExistingSheets.every((v, i) => v === selectedSheetTitles[i])) {
+          setSelectedSheetTitles(validExistingSheets);
+        }
+        await fetchHeadersForSheet(sheetId, validExistingSheets[0]);
+      } else {
+        setSelectedSheetTitles(targetSheet ? [targetSheet] : []);
+        if (targetSheet) {
+          await fetchHeadersForSheet(sheetId, targetSheet);
+        }
       }
     } catch (err: any) {
       setError(err.message || 'Failed to fetch sheets.');
@@ -285,6 +296,13 @@ export default function App() {
       setIsFetchingMetadata(false);
     }
   };
+
+  useEffect(() => {
+    if (isConfiguring && sheetUrl && availableSheets.length === 0 && !isFetchingMetadata && authStatus.isAuthenticated) {
+      fetchMetadataAndData();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConfiguring, authStatus.isAuthenticated]);
 
   const fetchHeadersForSheet = async (sheetId: string, sheetName: string) => {
     try {
@@ -316,7 +334,7 @@ export default function App() {
       const sheetsToFetch = selectedSheetTitles.length > 0 ? selectedSheetTitles : [null];
       const allPages: PageData[] = [];
       let firstResolvedName = '';
-      const itemsPerPage = parseInt(itemsPerPageInput) || 12;
+      const itemsPerPage = parseInt(itemsPerPageInput) || 8;
 
       for (const sheetName of sheetsToFetch) {
         let query = `?sheetId=${sheetId}`;
@@ -340,83 +358,83 @@ export default function App() {
 
         if (!firstResolvedName) firstResolvedName = result.resolvedSheetName;
 
-        const values: any[][] = result.values;
-        if (!values || values.length === 0) continue;
-
-        const headerRowIdx = Math.max(0, parseInt(headerRowInput) - 1 || 0);
-        const startRow = headerRowIdx + 2;
-
-        const headers = values[headerRowIdx] ? values[headerRowIdx].map((h: string) => h.toLowerCase().trim()) : [];
-
-        const resolveColIndex = (input: string) => {
-          const trimmed = input.trim();
-          if (!trimmed) return -1;
-          
-          // Try exact header match first (case-insensitive)
-          const idx = headers.findIndex((h: string) => h === trimmed.toLowerCase());
-          if (idx !== -1) return idx;
-
-          // If not found as a header, check if it's a valid column letter
-          if (/^[A-Z]+$/i.test(trimmed)) {
-            let colIdx = 0;
-            const upper = trimmed.toUpperCase();
-            for (let i = 0; i < upper.length; i++) {
-              colIdx = colIdx * 26 + (upper.charCodeAt(i) - 64);
-            }
-            return colIdx - 1;
-          }
-
-          return -1;
-        };
-
-        const nameIdx = resolveColIndex(nameColInput);
-        const datesIdx = resolveColIndex(datesColInput);
-        const startDateIdx = resolveColIndex(startDateColInput);
-        const endDateIdx = resolveColIndex(endDateColInput);
-
-        if (nameIdx === -1 && datesIdx === -1) {
-          console.warn(`Could not find columns matching "${nameColInput}" or "${datesColInput}" in sheet ${result.resolvedSheetName}.`);
-          continue;
-        }
-
+        const values: any[][] = result.values || [];
         const parsedData: DataRow[] = [];
-        for (let i = startRow - 1; i < values.length; i++) {
-          const row = values[i];
-          if (!row) continue;
 
-          // Filter out rows with start date in the future
-          if (startDateIdx !== -1 && startDateIdx < row.length) {
-            const startDateStr = row[startDateIdx];
-            if (startDateStr) {
-              const startDate = new Date(startDateStr);
-              if (!isNaN(startDate.getTime())) {
-                if (startDate.getTime() > Date.now()) {
-                  continue; // Skip this row as it starts in the future
+        if (values.length > 0) {
+          const headerRowIdx = Math.max(0, parseInt(headerRowInput) - 1 || 0);
+          const startRow = headerRowIdx + 2;
+
+          const headers = values[headerRowIdx] ? values[headerRowIdx].map((h: string) => h.toLowerCase().trim()) : [];
+
+          const resolveColIndex = (input: string) => {
+            const trimmed = input.trim();
+            if (!trimmed) return -1;
+            
+            // Try exact header match first (case-insensitive)
+            const idx = headers.findIndex((h: string) => h === trimmed.toLowerCase());
+            if (idx !== -1) return idx;
+
+            // If not found as a header, check if it's a valid column letter
+            if (/^[A-Z]+$/i.test(trimmed)) {
+              let colIdx = 0;
+              const upper = trimmed.toUpperCase();
+              for (let i = 0; i < upper.length; i++) {
+                colIdx = colIdx * 26 + (upper.charCodeAt(i) - 64);
+              }
+              return colIdx - 1;
+            }
+
+            return -1;
+          };
+
+          const nameIdx = resolveColIndex(nameColInput);
+          const datesIdx = resolveColIndex(datesColInput);
+          const startDateIdx = resolveColIndex(startDateColInput);
+          const endDateIdx = resolveColIndex(endDateColInput);
+
+          if (nameIdx === -1 && datesIdx === -1) {
+            console.warn(`Could not find columns matching "${nameColInput}" or "${datesColInput}" in sheet ${result.resolvedSheetName}.`);
+          } else {
+            for (let i = startRow - 1; i < values.length; i++) {
+              const row = values[i];
+              if (!row) continue;
+
+              // Filter out rows with start date in the future
+              if (startDateIdx !== -1 && startDateIdx < row.length) {
+                const startDateStr = row[startDateIdx];
+                if (startDateStr) {
+                  const startDate = new Date(startDateStr);
+                  if (!isNaN(startDate.getTime())) {
+                    if (startDate.getTime() > Date.now()) {
+                      continue; // Skip this row as it starts in the future
+                    }
+                  }
                 }
               }
-            }
-          }
 
-          if (endDateIdx !== -1 && endDateIdx < row.length) {
-            const endDateStr = row[endDateIdx];
-            if (endDateStr) {
-              const endDate = new Date(endDateStr);
-              if (!isNaN(endDate.getTime())) {
-                // If no specific time was provided (exactly midnight), push to the end of the day
-                if (endDate.getHours() === 0 && endDate.getMinutes() === 0 && endDate.getSeconds() === 0) {
-                  endDate.setHours(23, 59, 59, 999);
-                }
-                if (endDate.getTime() < Date.now()) {
-                  continue; // Skip this row as it has passed the end date
+              if (endDateIdx !== -1 && endDateIdx < row.length) {
+                const endDateStr = row[endDateIdx];
+                if (endDateStr) {
+                  const endDate = new Date(endDateStr);
+                  if (!isNaN(endDate.getTime())) {
+                    // If no specific time was provided (exactly midnight), push to the end of the day
+                    if (endDate.getHours() === 0 && endDate.getMinutes() === 0 && endDate.getSeconds() === 0) {
+                      endDate.setHours(23, 59, 59, 999);
+                    }
+                    if (endDate.getTime() < Date.now()) {
+                      continue; // Skip this row as it has passed the end date
+                    }
+                  }
                 }
               }
-            }
-          }
 
-          const name = nameIdx !== -1 && nameIdx < row.length ? row[nameIdx] : '';
-          const dates = datesIdx !== -1 && datesIdx < row.length ? row[datesIdx] : '';
-          if (name || dates) {
-            parsedData.push({ id: `${result.resolvedSheetName}-${i}`, name, dates });
+              const name = nameIdx !== -1 && nameIdx < row.length ? row[nameIdx] : '';
+              const dates = datesIdx !== -1 && datesIdx < row.length ? row[datesIdx] : '';
+              if (name || dates) {
+                parsedData.push({ id: `${result.resolvedSheetName}-${i}`, name, dates });
+              }
+            }
           }
         }
         
@@ -428,11 +446,12 @@ export default function App() {
               items: parsedData.slice(p * itemsPerPage, (p + 1) * itemsPerPage)
             });
           }
+        } else {
+          allPages.push({
+            sheetName: result.resolvedSheetName,
+            items: []
+          });
         }
-      }
-
-      if (allPages.length === 0) {
-        throw new Error('No valid data found in the selected sheets.');
       }
 
       setPages(allPages);

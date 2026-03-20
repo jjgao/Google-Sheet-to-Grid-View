@@ -807,13 +807,13 @@ export default function App() {
             <div key={row.id} className="flex flex-col items-center">
             <div className="w-full aspect-[2/1] bg-[#ffcc66] rounded-2xl flex items-center justify-center shadow-lg mb-4 p-4 text-center">
               {row.name && (
-                <span className="text-3xl md:text-4xl font-bold text-[#000066] break-words line-clamp-2">
+                <span className="text-3xl md:text-4xl font-bold text-[#000066] break-words line-clamp-3 whitespace-pre-wrap">
                   {row.name}
                 </span>
               )}
             </div>
             {row.dates && (
-              <div className="text-center text-white/60 text-xs md:text-sm font-light whitespace-pre-line leading-relaxed tracking-wide mt-1">
+              <div className="text-center text-white/60 text-xs md:text-sm font-light whitespace-pre-wrap leading-relaxed tracking-wide mt-1">
                 {row.dates}
               </div>
             )}

@@ -201,39 +201,34 @@ export default function App() {
     return () => clearInterval(interval);
   }, [isConfiguring, refreshIntervalInput, sheetUrl, nameColInput, datesColInput, startDateColInput, endDateColInput, headerRowInput]);
 
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+
   useEffect(() => {
-    checkAuthStatus();
-    const handleMessage = (event: MessageEvent) => {
-      const origin = event.origin;
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) return;
-      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        checkAuthStatus();
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
-
-  const checkAuthStatus = async () => {
-    try {
-      const res = await fetch('/api/auth/status');
-      const data = await res.json();
-      setAuthStatus({ ...data, checking: false });
-    } catch (e) {
-      setAuthStatus(prev => ({ ...prev, checking: false }));
+    if (clientId) {
+      setAuthStatus({ isAuthenticated: !!accessToken, isConfigured: true, checking: false });
+    } else {
+      setAuthStatus({ isAuthenticated: false, isConfigured: false, checking: false });
     }
-  };
+  }, [clientId, accessToken]);
 
-  const handleConnectGoogle = async () => {
+  const handleConnectGoogle = () => {
+    if (!clientId) {
+      setError("VITE_GOOGLE_CLIENT_ID is not configured.");
+      return;
+    }
     try {
-      const response = await fetch('/api/auth/url');
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to get auth URL');
-
-      const authWindow = window.open(data.url, 'oauth_popup', 'width=600,height=700');
-      if (!authWindow) {
-        alert('Please allow popups for this site to connect your account.');
-      }
+      const client = (window as any).google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: 'https://www.googleapis.com/auth/spreadsheets.readonly',
+        callback: (tokenResponse: any) => {
+          if (tokenResponse && tokenResponse.access_token) {
+            setAccessToken(tokenResponse.access_token);
+            setAuthStatus({ isAuthenticated: true, isConfigured: true, checking: false });
+          }
+        },
+      });
+      client.requestAccessToken();
     } catch (error: any) {
       setError(error.message || 'Failed to initiate Google Sign-In.');
     }
@@ -255,28 +250,36 @@ export default function App() {
     try {
       const sheetId = extractSheetId(sheetUrl);
       if (!sheetId) throw new Error('Please enter a valid Google Sheet URL or ID.');
+      if (!accessToken) throw new Error('Not authenticated.');
 
-      const metaRes = await fetch(`/api/sheet/metadata?sheetId=${sheetId}`);
+      const metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties`, {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
       const metaResult = await metaRes.json();
       if (!metaRes.ok) {
-        if (metaRes.status === 401) {
-          setAuthStatus(prev => ({ ...prev, isAuthenticated: false }));
-          throw new Error('Authentication expired. Please sign in again.');
+        if (metaRes.status === 401 || metaRes.status === 403) {
+          setAccessToken(null);
+          throw new Error(`Authentication ${metaRes.status === 401 ? 'expired' : 'failed'}. Please sign in again.`);
         }
-        throw new Error(metaResult.error || 'Failed to fetch metadata.');
+        throw new Error(metaResult.error?.message || `Failed to fetch metadata (${metaRes.status}).`);
       }
 
-      setAvailableSheets(metaResult.sheets);
+      const sheets = metaResult.sheets?.map((s: any) => ({
+        sheetId: s.properties?.sheetId,
+        title: s.properties?.title
+      })) || [];
+
+      setAvailableSheets(sheets);
 
       const gid = extractGid(sheetUrl);
-      let targetSheet = metaResult.sheets[0]?.title;
+      let targetSheet = sheets[0]?.title;
       if (gid) {
-        const found = metaResult.sheets.find((s: any) => s.sheetId === Number(gid));
+        const found = sheets.find((s: any) => s.sheetId === Number(gid));
         if (found) targetSheet = found.title;
       }
       
       const validExistingSheets = selectedSheetTitles.filter(title => 
-        metaResult.sheets.some((s: any) => s.title === title)
+        sheets.some((s: any) => s.title === title)
       );
 
       if (validExistingSheets.length > 0) {
@@ -306,9 +309,18 @@ export default function App() {
 
   const fetchHeadersForSheet = async (sheetId: string, sheetName: string) => {
     try {
-      const response = await fetch(`/api/sheet?sheetId=${sheetId}&sheetName=${encodeURIComponent(sheetName)}`);
+      if (!accessToken) return;
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(sheetName)}!A1:ZZ`, {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Failed to fetch sheet data.');
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          setAccessToken(null);
+          throw new Error(`Authentication ${response.status === 401 ? 'expired' : 'failed'}. Please sign in again.`);
+        }
+        throw new Error(result.error?.message || `Failed to fetch sheet data (${response.status}).`);
+      }
       
       const values: any[][] = result.values;
       if (!values || values.length === 0) return;
@@ -330,6 +342,7 @@ export default function App() {
       const gid = extractGid(sheetUrl);
       
       if (!sheetId) throw new Error('Please enter a valid Google Sheet URL or ID.');
+      if (!accessToken) throw new Error('Not authenticated.');
 
       const sheetsToFetch = selectedSheetTitles.length > 0 ? selectedSheetTitles : [null];
       const allPages: PageData[] = [];
@@ -337,26 +350,49 @@ export default function App() {
       const itemsPerPage = parseInt(itemsPerPageInput) || 8;
 
       for (const sheetName of sheetsToFetch) {
-        let query = `?sheetId=${sheetId}`;
-        if (sheetName) {
-          query += `&sheetName=${encodeURIComponent(sheetName)}`;
-        } else if (gid) {
-          query += `&gid=${gid}`;
+        let targetSheetName = sheetName;
+        
+        if (!targetSheetName) {
+          const metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties`, {
+            headers: { Authorization: `Bearer ${accessToken}` }
+          });
+          const metaData = await metaRes.json();
+          if (!metaRes.ok) {
+            if (metaRes.status === 401 || metaRes.status === 403) {
+              setAccessToken(null);
+              if (!isBackground) setIsConfiguring(true);
+              throw new Error(`Authentication ${metaRes.status === 401 ? 'expired' : 'failed'}. Please sign in again.`);
+            }
+            throw new Error(metaData.error?.message || `Failed to fetch metadata (${metaRes.status}).`);
+          }
+          
+          if (gid) {
+            const targetGid = Number(gid);
+            const sheet = metaData.sheets?.find((s: any) => s.properties?.sheetId === targetGid);
+            if (!sheet) throw new Error(`Sheet with gid=${gid} not found.`);
+            targetSheetName = sheet.properties.title;
+          } else {
+            targetSheetName = metaData.sheets?.[0]?.properties?.title;
+          }
         }
 
-        const response = await fetch(`/api/sheet${query}`);
+        if (!targetSheetName) throw new Error("Could not determine sheet name.");
+
+        const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(targetSheetName)}!A1:ZZ`, {
+          headers: { Authorization: `Bearer ${accessToken}` }
+        });
         const result = await response.json();
 
         if (!response.ok) {
-          if (response.status === 401) {
-            setAuthStatus(prev => ({ ...prev, isAuthenticated: false }));
+          if (response.status === 401 || response.status === 403) {
+            setAccessToken(null);
             if (!isBackground) setIsConfiguring(true);
-            throw new Error('Authentication expired. Please sign in again.');
+            throw new Error(`Authentication ${response.status === 401 ? 'expired' : 'failed'}. Please sign in again.`);
           }
-          throw new Error(result.error || 'Failed to fetch data.');
+          throw new Error(result.error?.message || `Failed to fetch data (${response.status}).`);
         }
 
-        if (!firstResolvedName) firstResolvedName = result.resolvedSheetName;
+        if (!firstResolvedName) firstResolvedName = targetSheetName;
 
         const values: any[][] = result.values || [];
         const parsedData: DataRow[] = [];
@@ -394,7 +430,7 @@ export default function App() {
           const endDateIdx = resolveColIndex(endDateColInput);
 
           if (nameIdx === -1 && datesIdx === -1) {
-            console.warn(`Could not find columns matching "${nameColInput}" or "${datesColInput}" in sheet ${result.resolvedSheetName}.`);
+            console.warn(`Could not find columns matching "${nameColInput}" or "${datesColInput}" in sheet ${targetSheetName}.`);
           } else {
             for (let i = startRow - 1; i < values.length; i++) {
               const row = values[i];
@@ -432,7 +468,7 @@ export default function App() {
               const name = nameIdx !== -1 && nameIdx < row.length ? row[nameIdx] : '';
               const dates = datesIdx !== -1 && datesIdx < row.length ? row[datesIdx] : '';
               if (name || dates) {
-                parsedData.push({ id: `${result.resolvedSheetName}-${i}`, name, dates });
+                parsedData.push({ id: `${targetSheetName}-${i}`, name, dates });
               }
             }
           }
@@ -442,13 +478,13 @@ export default function App() {
           const sheetPages = Math.ceil(parsedData.length / itemsPerPage);
           for (let p = 0; p < sheetPages; p++) {
             allPages.push({
-              sheetName: result.resolvedSheetName,
+              sheetName: targetSheetName,
               items: parsedData.slice(p * itemsPerPage, (p + 1) * itemsPerPage)
             });
           }
         } else {
           allPages.push({
-            sheetName: result.resolvedSheetName,
+            sheetName: targetSheetName,
             items: []
           });
         }
@@ -525,11 +561,11 @@ export default function App() {
               <p className="mb-2">To connect to private sheets, you need to configure Google OAuth.</p>
               <ol className="list-decimal list-inside space-y-1 ml-1">
                 <li>Create a Google Cloud Project</li>
-                <li>Enable the Google Sheets API</li>
+                <li>Enable the <strong>Google Sheets API</strong></li>
                 <li>Configure OAuth Consent Screen</li>
                 <li>Create OAuth Client ID (Web Application)</li>
-                <li>Add the Redirect URI shown below</li>
-                <li>Set <strong>GOOGLE_CLIENT_ID</strong> and <strong>GOOGLE_CLIENT_SECRET</strong> in AI Studio settings</li>
+                <li>Add the Authorized JavaScript Origin: <strong>{window.location.origin}</strong></li>
+                <li>Set <strong>VITE_GOOGLE_CLIENT_ID</strong> in AI Studio settings</li>
               </ol>
             </div>
           ) : !authStatus.isAuthenticated ? (
@@ -545,18 +581,39 @@ export default function App() {
                 Sign in with Google
               </button>
               {error && (
-                <div className="mt-4 bg-red-50 text-red-600 p-3 rounded-lg flex items-start gap-2 text-sm">
-                  <AlertCircle size={16} className="mt-0.5 shrink-0" />
-                  <span>{error}</span>
+                <div className="mt-4 bg-red-50 text-red-600 p-3 rounded-lg flex flex-col gap-2 text-sm">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                    <span>{error}</span>
+                  </div>
+                  {error.includes('403') && (
+                    <div className="mt-2 text-xs border-t border-red-200 pt-2">
+                      <strong>Tip:</strong> If you see 403 Forbidden, ensure:
+                      <ul className="list-disc list-inside mt-1 ml-1">
+                        <li>Google Sheets API is enabled in your Cloud Project</li>
+                        <li><strong>{window.location.origin}</strong> is added to "Authorized JavaScript Origins"</li>
+                        <li>You have permission to view the spreadsheet</li>
+                      </ul>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           ) : (
             <form onSubmit={loadData} className="space-y-5">
               <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  Google Sheet URL or ID
-                </label>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="block text-sm font-semibold text-gray-700">
+                    Google Sheet URL or ID
+                  </label>
+                  <button 
+                    type="button" 
+                    onClick={() => { setAccessToken(null); setAuthStatus(prev => ({ ...prev, isAuthenticated: false })); }}
+                    className="text-xs text-red-600 hover:underline font-medium"
+                  >
+                    Sign Out
+                  </button>
+                </div>
                 <div className="flex gap-2">
                   <input
                     type="text"
